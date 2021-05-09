@@ -111,7 +111,7 @@ where
         }
     }
 
-    pub async fn send(&self, msg: A::Msg) {
+    pub async fn send(&self, msg: impl Into<A::Msg>) {
         self.recipient.send(msg).await
     }
 
@@ -140,8 +140,8 @@ impl<T> Recipient<T> {
         Self { sender }
     }
 
-    pub async fn send(&self, msg: T) {
-        if self.sender.send(msg).await.is_err() {
+    pub async fn send(&self, msg: impl Into<T>) {
+        if self.sender.send(msg.into()).await.is_err() {
             eprint!("failed to send msg");
         }
     }
