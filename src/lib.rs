@@ -193,7 +193,7 @@ where
     /// Send a message back to this actor.
     ///
     /// Messages sent this way take priority over regular messages.
-    pub fn notify(&mut self, msg: A::Msg) {
-        self.priority.push_front(msg);
+    pub fn notify(&mut self, msg: impl Into<A::Msg>) {
+        self.priority.push_front(msg.into());
     }
 }
