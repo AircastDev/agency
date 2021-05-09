@@ -10,6 +10,8 @@ pub trait Actor: Send + Sync + Sized {
 
     async fn run(&mut self, ctx: &mut Context<Self>);
 
+    async fn init(&mut self, _ctx: &mut Context<Self>) {}
+
     async fn stopped(&mut self, _ctx: &mut Context<Self>) {}
 }
 
@@ -50,6 +52,8 @@ impl Agency {
         };
         self.nursery
             .nurse(async move {
+                actor.init(&mut ctx).await;
+
                 while !ctx.stopped {
                     actor.run(&mut ctx).await;
                 }
@@ -76,6 +80,8 @@ impl Agency {
         self.nursery
             .nurse(async move {
                 if let Some(mut actor) = A::setup(&mut ctx, args).await {
+                    actor.init(&mut ctx).await;
+
                     while !ctx.stopped {
                         actor.run(&mut ctx).await;
                     }
