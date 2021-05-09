@@ -165,12 +165,15 @@ where
     A: Actor,
 {
     /// Pull the next message off the stack, waiting if there are none
-    pub async fn message(&mut self) -> Option<A::Msg> {
+    pub async fn message(&mut self) -> A::Msg {
         if let Some(msg) = self.priority.pop_back() {
-            return Some(msg);
+            return msg;
         }
 
-        self.mailbox.recv().await
+        self.mailbox
+            .recv()
+            .await
+            .expect("channel cannot be closed whilst context lives")
     }
 
     pub fn stop(&mut self) {
