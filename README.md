@@ -1,2 +1,3 @@
-# agency
-Rust actor style framework
+# Agency
+
+A small async actor framework for Rust

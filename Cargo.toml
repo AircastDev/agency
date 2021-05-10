@@ -3,6 +3,10 @@ name = "agency"
 version = "0.1.0"
 authors = ["James Birtles <james@birtles.dev>"]
 edition = "2018"
+license = "MIT"
+description = "A small async actor framework"
+repository = "https://github.com/AircastDev/agency"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
