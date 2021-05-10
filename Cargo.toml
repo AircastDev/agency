@@ -7,8 +7,10 @@ license = "MIT"
 description = "A small async actor framework"
 repository = "https://github.com/AircastDev/agency"
 readme = "README.md"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+exclude = [
+    ".devcontainer/*",
+    ".gitignore",
+]
 
 [dependencies]
 async-trait = "0.1.50"
