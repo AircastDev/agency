@@ -12,7 +12,7 @@ pub trait Actor: Send + Sync + Sized {
 
     async fn init(&mut self, _ctx: &mut Context<Self>) {}
 
-    async fn stopped(&mut self, _ctx: &mut Context<Self>) {}
+    async fn stopped(self, _ctx: &mut Context<Self>) {}
 }
 
 #[async_trait]
