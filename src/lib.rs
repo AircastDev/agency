@@ -1,8 +1,13 @@
-use async_executors::{TokioTp, TokioTpBuilder};
-use async_nursery::{NurseExt, Nursery};
 pub use async_trait::async_trait;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::{collections::VecDeque, future::Future};
-use tokio::sync::mpsc;
+use tokio::{
+    select,
+    sync::mpsc::{
+        channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+    },
+    task::JoinHandle,
+};
 
 #[async_trait]
 pub trait Actor: Send + Sync + Sized {
@@ -22,45 +27,96 @@ pub trait Setup: Actor {
     async fn setup(ctx: &mut Context<Self>, args: Self::Args) -> Option<Self>;
 }
 
+pub struct AgencyHandle {
+    futures: FuturesUnordered<JoinHandle<()>>,
+    channel: (
+        UnboundedSender<JoinHandle<()>>,
+        UnboundedReceiver<JoinHandle<()>>,
+    ),
+}
+
+impl AgencyHandle {
+    fn new() -> Self {
+        Self {
+            futures: FuturesUnordered::new(),
+            channel: unbounded_channel(),
+        }
+    }
+
+    fn spawner(&self) -> Spawner {
+        Spawner::new(self.channel.0.clone())
+    }
+
+    pub async fn wait(mut self) {
+        loop {
+            select! {
+                biased;
+                fut = self.channel.1.recv() => {
+                    self.futures.push(fut.expect("sender is held by the handle"));
+                }
+                res = self.futures.next() => {
+                    // TODO: i think we can catch and log panics here?
+                    if res.is_none() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Spawner {
+    sender: UnboundedSender<JoinHandle<()>>,
+}
+
+impl Spawner {
+    fn new(sender: UnboundedSender<JoinHandle<()>>) -> Self {
+        Self { sender }
+    }
+
+    fn spawn<T>(&self, fut: T)
+    where
+        T: Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::task::spawn(fut);
+        self.sender
+            .send(handle)
+            .expect("attempt to spawn task after the handler was dropped");
+    }
+}
+
 #[derive(Clone)]
 pub struct Agency {
-    nursery: Nursery<TokioTp, ()>,
+    spawner: Spawner,
 }
 
 impl Agency {
-    pub fn new() -> (Self, impl Future<Output = ()>) {
-        let mut exec_builder = TokioTpBuilder::new();
-        exec_builder.tokio_builder().enable_all();
-        let exec = exec_builder.build().expect("create tokio threadpool");
-
-        let (nursery, nursery_stream) = Nursery::new(exec);
-        (Agency { nursery }, nursery_stream)
+    pub fn new() -> (Self, AgencyHandle) {
+        let handle = AgencyHandle::new();
+        (
+            Agency {
+                spawner: handle.spawner(),
+            },
+            handle,
+        )
     }
 
     pub fn hire<A>(&self, mut actor: A) -> Addr<A>
     where
         A: 'static + Actor,
     {
-        let (sender, receiver) = mpsc::channel(16);
-        let addr = Addr::new(sender);
-        let mut ctx = Context {
-            mailbox: receiver,
-            priority: VecDeque::new(),
-            stopped: false,
-            addr: addr.clone(),
-            agency: self.clone(),
-        };
-        self.nursery
-            .nurse(async move {
-                actor.init(&mut ctx).await;
+        let mut ctx = Context::new(self.clone());
+        let addr = ctx.address();
+        self.spawner.spawn(async move {
+            actor.init(&mut ctx).await;
 
-                while !ctx.stopped {
-                    actor.run(&mut ctx).await;
-                }
+            while !ctx.stopped {
+                actor.run(&mut ctx).await;
+            }
 
-                actor.stopped(&mut ctx).await;
-            })
-            .unwrap();
+            actor.stopped(&mut ctx).await;
+        });
         addr
     }
 
@@ -68,28 +124,19 @@ impl Agency {
     where
         A: 'static + Setup,
     {
-        let (sender, receiver) = mpsc::channel(16);
-        let addr = Addr::new(sender);
-        let mut ctx = Context {
-            mailbox: receiver,
-            priority: VecDeque::new(),
-            stopped: false,
-            addr: addr.clone(),
-            agency: self.clone(),
-        };
-        self.nursery
-            .nurse(async move {
-                if let Some(mut actor) = A::setup(&mut ctx, args).await {
-                    actor.init(&mut ctx).await;
+        let mut ctx = Context::new(self.clone());
+        let addr = ctx.address();
+        self.spawner.spawn(async move {
+            if let Some(mut actor) = A::setup(&mut ctx, args).await {
+                actor.init(&mut ctx).await;
 
-                    while !ctx.stopped {
-                        actor.run(&mut ctx).await;
-                    }
-
-                    actor.stopped(&mut ctx).await;
+                while !ctx.stopped {
+                    actor.run(&mut ctx).await;
                 }
-            })
-            .unwrap();
+
+                actor.stopped(&mut ctx).await;
+            }
+        });
         addr
     }
 }
@@ -105,7 +152,7 @@ impl<A> Addr<A>
 where
     A: Actor,
 {
-    fn new(sender: mpsc::Sender<A::Msg>) -> Self {
+    fn new(sender: Sender<A::Msg>) -> Self {
         Self {
             recipient: Recipient::new(sender),
         }
@@ -132,17 +179,18 @@ where
 }
 
 pub struct Recipient<T> {
-    sender: mpsc::Sender<T>,
+    sender: Sender<T>,
 }
 
 impl<T> Recipient<T> {
-    fn new(sender: mpsc::Sender<T>) -> Self {
+    fn new(sender: Sender<T>) -> Self {
         Self { sender }
     }
 
     pub async fn send(&self, msg: impl Into<T>) {
         if self.sender.send(msg.into()).await.is_err() {
-            eprint!("failed to send msg");
+            // TODO: probably better to bubble this up
+            eprintln!("failed to send msg");
         }
     }
 }
@@ -159,7 +207,7 @@ pub struct Context<A>
 where
     A: Actor,
 {
-    mailbox: mpsc::Receiver<A::Msg>,
+    mailbox: Receiver<A::Msg>,
     priority: VecDeque<A::Msg>,
     stopped: bool,
     addr: Addr<A>,
@@ -170,6 +218,17 @@ impl<A> Context<A>
 where
     A: Actor,
 {
+    fn new(agency: Agency) -> Self {
+        let (sender, receiver) = channel(16);
+        Self {
+            mailbox: receiver,
+            priority: VecDeque::new(),
+            stopped: false,
+            addr: Addr::new(sender),
+            agency,
+        }
+    }
+
     /// Pull the next message off the stack, waiting if there are none
     pub async fn message(&mut self) -> A::Msg {
         if let Some(msg) = self.priority.pop_back() {
