@@ -1,17 +1,17 @@
 pub use async_trait::async_trait;
+use dyn_clone::DynClone;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use std::{collections::VecDeque, future::Future};
+use std::{collections::VecDeque, future::Future, hash::Hash};
 use tokio::{
     select,
-    sync::mpsc::{
-        channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
-    },
+    sync::mpsc::{self, channel, unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
+use uuid::Uuid;
 
 #[async_trait]
 pub trait Actor: Send + Sync + Sized {
-    type Msg: Send + Sync;
+    type Msg: 'static + Send + Sync;
 
     async fn run(&mut self, ctx: &mut Context<Self>);
 
@@ -145,25 +145,33 @@ pub struct Addr<A>
 where
     A: Actor,
 {
-    recipient: Recipient<A::Msg>,
+    id: Uuid,
+    sender: mpsc::Sender<A::Msg>,
 }
 
 impl<A> Addr<A>
 where
     A: Actor,
 {
-    fn new(sender: Sender<A::Msg>) -> Self {
+    fn new(sender: mpsc::Sender<A::Msg>) -> Self {
         Self {
-            recipient: Recipient::new(sender),
+            id: Uuid::new_v4(),
+            sender,
         }
     }
 
     pub async fn send(&self, msg: impl Into<A::Msg>) {
-        self.recipient.send(msg).await
+        if self.sender.send(msg.into()).await.is_err() {
+            // TODO: probably better to bubble this up
+            eprintln!("failed to send msg");
+        }
     }
 
-    pub fn recipient(self) -> Recipient<A::Msg> {
-        self.recipient
+    pub fn recipient<M>(self) -> Recipient<M>
+    where
+        M: 'static + Into<A::Msg> + Send,
+    {
+        self.into()
     }
 }
 
@@ -173,41 +181,110 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            recipient: self.recipient.clone(),
+            id: self.id,
+            sender: self.sender.clone(),
         }
     }
 }
 
-pub struct Recipient<T> {
-    sender: Sender<T>,
+impl<A> Hash for Addr<A>
+where
+    A: Actor,
+{
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(b"addr:");
+        self.id.hash(state)
+    }
 }
 
-impl<T> Recipient<T> {
-    fn new(sender: Sender<T>) -> Self {
-        Self { sender }
+impl<A> PartialEq for Addr<A>
+where
+    A: Actor,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
     }
+}
 
-    pub async fn send(&self, msg: impl Into<T>) {
-        if self.sender.send(msg.into()).await.is_err() {
+impl<A> Eq for Addr<A> where A: Actor {}
+
+#[async_trait]
+trait RecipientSender<M>: 'static + Send + Send + DynClone {
+    async fn send_to_recipient(&self, msg: M);
+}
+
+dyn_clone::clone_trait_object!(<M> RecipientSender<M>);
+
+#[async_trait]
+impl<S, M> RecipientSender<M> for mpsc::Sender<S>
+where
+    S: 'static + Send,
+    M: 'static + Send + Into<S>,
+{
+    async fn send_to_recipient(&self, msg: M) {
+        if self.send(msg.into()).await.is_err() {
             // TODO: probably better to bubble this up
             eprintln!("failed to send msg");
         }
     }
 }
 
-impl<T> Clone for Recipient<T> {
+impl<A, M> From<Addr<A>> for Recipient<M>
+where
+    A: Actor,
+    M: 'static + Send + Into<A::Msg>,
+{
+    fn from(addr: Addr<A>) -> Self {
+        Self {
+            id: addr.id,
+            sender: Box::new(addr.sender),
+        }
+    }
+}
+
+pub struct Recipient<M>
+where
+    M: 'static,
+{
+    id: Uuid,
+    sender: Box<dyn RecipientSender<M> + Send + Sync>,
+}
+
+impl<M> Recipient<M> {
+    pub async fn send(&self, msg: impl Into<M>) {
+        self.sender.send_to_recipient(msg.into()).await
+    }
+}
+
+impl<M> Clone for Recipient<M> {
     fn clone(&self) -> Self {
         Self {
+            id: self.id,
             sender: self.sender.clone(),
         }
     }
 }
 
+impl<M> Hash for Recipient<M> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(b"recipient:");
+        self.id.hash(state)
+    }
+}
+
+impl<M> PartialEq for Recipient<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<M> Eq for Recipient<M> {}
+
 pub struct Context<A>
 where
     A: Actor,
 {
-    mailbox: Receiver<A::Msg>,
+    mailbox: mpsc::Receiver<A::Msg>,
     priority: VecDeque<A::Msg>,
     stopped: bool,
     addr: Addr<A>,
