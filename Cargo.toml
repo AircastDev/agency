@@ -1,6 +1,6 @@
 [package]
 name = "agency"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["James Birtles <james@birtles.dev>"]
 edition = "2018"
 license = "MIT"
@@ -18,3 +18,4 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 uuid = { version = "0.8", features = ["v4"] }
 dyn-clone = "1"
+tracing = "0.1"

@@ -193,7 +193,7 @@ where
     pub async fn send(&self, msg: impl Into<A::Msg>) {
         if self.sender.send(msg.into()).await.is_err() {
             // TODO: probably better to bubble this up
-            eprintln!("failed to send msg");
+            tracing::error!("failed to send msg");
         }
     }
 
@@ -254,7 +254,7 @@ where
     async fn send_to_recipient(&self, msg: M) {
         if self.send(msg.into()).await.is_err() {
             // TODO: probably better to bubble this up
-            eprintln!("failed to send msg");
+            tracing::error!("failed to send msg");
         }
     }
 }
