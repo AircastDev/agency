@@ -1,7 +1,13 @@
 pub use async_trait::async_trait;
 use dyn_clone::DynClone;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use std::{collections::VecDeque, future::Future, hash::Hash};
+use std::{
+    collections::VecDeque,
+    error::Error,
+    fmt::{Debug, Display},
+    future::Future,
+    hash::Hash,
+};
 use tokio::{
     select,
     sync::mpsc::{self, channel, unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -190,11 +196,15 @@ where
         }
     }
 
-    pub async fn send(&self, msg: impl Into<A::Msg>) {
-        if self.sender.send(msg.into()).await.is_err() {
-            // TODO: probably better to bubble this up
-            tracing::error!("failed to send msg");
-        }
+    /// Send a message to this actor.
+    ///
+    /// This will block (asynchronously) if the actor's buffer is full
+    ///
+    /// # Errors
+    ///
+    /// This will error if the actor is no longer running.
+    pub async fn send(&self, msg: impl Into<A::Msg>) -> Result<(), SendError> {
+        self.sender.send(msg.into()).await.map_err(|_| SendError)
     }
 
     pub fn recipient<M>(self) -> Recipient<M>
@@ -238,9 +248,20 @@ where
 
 impl<A> Eq for Addr<A> where A: Actor {}
 
+#[derive(Debug)]
+pub struct SendError;
+
+impl Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "actor stopped")
+    }
+}
+
+impl Error for SendError {}
+
 #[async_trait]
 trait RecipientSender<M>: 'static + Send + Send + DynClone {
-    async fn send_to_recipient(&self, msg: M);
+    async fn send_to_recipient(&self, msg: M) -> Result<(), SendError>;
 }
 
 dyn_clone::clone_trait_object!(<M> RecipientSender<M>);
@@ -251,11 +272,8 @@ where
     S: 'static + Send,
     M: 'static + Send + Into<S>,
 {
-    async fn send_to_recipient(&self, msg: M) {
-        if self.send(msg.into()).await.is_err() {
-            // TODO: probably better to bubble this up
-            tracing::error!("failed to send msg");
-        }
+    async fn send_to_recipient(&self, msg: M) -> Result<(), SendError> {
+        self.send(msg.into()).await.map_err(|_| SendError)
     }
 }
 
@@ -281,7 +299,14 @@ where
 }
 
 impl<M> Recipient<M> {
-    pub async fn send(&self, msg: impl Into<M>) {
+    /// Send a message to the recipient.
+    ///
+    /// This will block (asynchronously) if the recipient's buffer is full
+    ///
+    /// # Errors
+    ///
+    /// This will error if the recipient is no longer running.
+    pub async fn send(&self, msg: impl Into<M>) -> Result<(), SendError> {
         self.sender.send_to_recipient(msg.into()).await
     }
 }
