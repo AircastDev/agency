@@ -1,12 +1,16 @@
-use crate::actor::Actor;
+use crate::{
+    actor::Actor,
+    request::{Request, RequestError, RequestTimeoutError},
+};
 use async_trait::async_trait;
 use dyn_clone::DynClone;
 use std::{
     error::Error,
     fmt::{Debug, Display},
     hash::Hash,
+    time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 use uuid::Uuid;
 
 pub struct Addr<A>
@@ -44,6 +48,47 @@ where
         M: 'static + Into<A::Msg> + Send,
     {
         self.into()
+    }
+
+    /// Send a [`Request`](crate::Request) to this actor and await the response.
+    ///
+    /// This could wait indefinitely if the actor never responds, however it will error if the actor
+    /// is stopped before or during the request, or if the response sender is otherwise dropped.
+    pub async fn request<Req, Res>(&self, payload: Req) -> Result<Res, RequestError>
+    where
+        Request<Req, Res>: Into<A::Msg>,
+    {
+        let (request, receiver) = Request::new(payload);
+        self.sender
+            .send(request.into())
+            .await
+            .map_err(|_| RequestError::ActorStopped)?;
+        let res = receiver.await.map_err(|_| RequestError::SenderDropped)?;
+        Ok(res)
+    }
+
+    /// Send a [`Request`](crate::Request) to this actor and await the response.
+    ///
+    /// This will error if the timeout is reached, if the actor is stopped before or during the
+    /// request, or if the response sender is otherwise dropped.
+    pub async fn request_timeout<Req, Res>(
+        &self,
+        payload: Req,
+        duration: Duration,
+    ) -> Result<Res, RequestTimeoutError>
+    where
+        Request<Req, Res>: Into<A::Msg>,
+    {
+        let (request, receiver) = Request::new(payload);
+        self.sender
+            .send(request.into())
+            .await
+            .map_err(|_| RequestTimeoutError::ActorStopped)?;
+        let res = timeout(duration, receiver)
+            .await
+            .map_err(|_| RequestTimeoutError::Timeout)?
+            .map_err(|_| RequestTimeoutError::SenderDropped)?;
+        Ok(res)
     }
 }
 
@@ -140,6 +185,43 @@ impl<M> Recipient<M> {
     /// This will error if the recipient is no longer running.
     pub async fn send(&self, msg: impl Into<M>) -> Result<(), SendError> {
         self.sender.send_to_recipient(msg.into()).await
+    }
+}
+
+impl<Req, Res> Recipient<Request<Req, Res>> {
+    /// Send a [`Request`](crate::Request) to the actor and await the response.
+    ///
+    /// This could wait indefinitely if the actor never responds, however it will error if the actor
+    /// is stopped before or during the request, or if the response sender is otherwise dropped.
+    pub async fn request(&self, payload: Req) -> Result<Res, RequestError> {
+        let (request, receiver) = Request::new(payload);
+        self.sender
+            .send_to_recipient(request)
+            .await
+            .map_err(|_| RequestError::ActorStopped)?;
+        let res = receiver.await.map_err(|_| RequestError::SenderDropped)?;
+        Ok(res)
+    }
+
+    /// Send a [`Request`](crate::Request) to the actor and await the response.
+    ///
+    /// This will error if the timeout is reached, if the actor is stopped before or during the
+    /// request, or if the response sender is otherwise dropped.
+    pub async fn request_timeout(
+        &self,
+        payload: Req,
+        duration: Duration,
+    ) -> Result<Res, RequestTimeoutError> {
+        let (request, receiver) = Request::new(payload);
+        self.sender
+            .send_to_recipient(request)
+            .await
+            .map_err(|_| RequestTimeoutError::ActorStopped)?;
+        let res = timeout(duration, receiver)
+            .await
+            .map_err(|_| RequestTimeoutError::Timeout)?
+            .map_err(|_| RequestTimeoutError::SenderDropped)?;
+        Ok(res)
     }
 }
 
