@@ -18,29 +18,46 @@ where
     A: Actor,
 {
     id: Uuid,
-    sender: mpsc::Sender<A::Msg>,
+    mailer: mpsc::Sender<A::Msg>,
+    priority_mailer: mpsc::UnboundedSender<A::Msg>,
 }
 
 impl<A> Addr<A>
 where
     A: Actor,
 {
-    pub(crate) fn new(sender: mpsc::Sender<A::Msg>) -> Self {
+    pub(crate) fn new(
+        mailer: mpsc::Sender<A::Msg>,
+        priority_mailer: mpsc::UnboundedSender<A::Msg>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
-            sender,
+            mailer,
+            priority_mailer,
         }
     }
 
     /// Send a message to this actor.
     ///
-    /// This will block (asynchronously) if the actor's buffer is full
+    /// This will block (asynchronously) if the actor's mailbox is full
     ///
     /// # Errors
     ///
     /// This will error if the actor is no longer running.
     pub async fn send(&self, msg: impl Into<A::Msg>) -> Result<(), SendError> {
-        self.sender.send(msg.into()).await.map_err(|_| SendError)
+        self.mailer.send(msg.into()).await.map_err(|_| SendError)
+    }
+
+    /// Send a message to this actor, with a higher priority over regular messages.
+    ///
+    /// Unlike [`Addr::send`], this will not block as the priority mailbox has infinite capacity. As
+    /// a result you should use this sparingly due to the lack of backpressure.
+    ///
+    /// # Errors
+    ///
+    /// This will error if the actor is no longer running.
+    pub fn send_priority(&self, msg: impl Into<A::Msg>) -> Result<(), SendError> {
+        self.priority_mailer.send(msg.into()).map_err(|_| SendError)
     }
 
     pub fn recipient<M>(self) -> Recipient<M>
@@ -59,7 +76,7 @@ where
         Request<Req, Res>: Into<A::Msg>,
     {
         let (request, receiver) = Request::new(payload);
-        self.sender
+        self.mailer
             .send(request.into())
             .await
             .map_err(|_| RequestError::ActorStopped)?;
@@ -80,7 +97,7 @@ where
         Request<Req, Res>: Into<A::Msg>,
     {
         let (request, receiver) = Request::new(payload);
-        self.sender
+        self.mailer
             .send(request.into())
             .await
             .map_err(|_| RequestTimeoutError::ActorStopped)?;
@@ -99,7 +116,8 @@ where
     fn clone(&self) -> Self {
         Self {
             id: self.id,
-            sender: self.sender.clone(),
+            mailer: self.mailer.clone(),
+            priority_mailer: self.priority_mailer.clone(),
         }
     }
 }
@@ -162,7 +180,7 @@ where
     fn from(addr: Addr<A>) -> Self {
         Self {
             id: addr.id,
-            sender: Box::new(addr.sender),
+            sender: Box::new(addr.mailer),
         }
     }
 }

@@ -1,13 +1,12 @@
 use crate::{actor::Actor, addr::Addr, agency::Agency};
-use std::collections::VecDeque;
-use tokio::sync::mpsc::{self, channel};
+use tokio::{select, sync::mpsc};
 
 pub struct Context<A>
 where
     A: Actor,
 {
     mailbox: mpsc::Receiver<A::Msg>,
-    priority: VecDeque<A::Msg>,
+    priority_mailbox: mpsc::UnboundedReceiver<A::Msg>,
     pub(crate) stopped: bool,
     addr: Addr<A>,
     pub agency: Agency,
@@ -18,26 +17,31 @@ where
     A: Actor,
 {
     pub(crate) fn new(agency: Agency) -> Self {
-        let (sender, receiver) = channel(16);
+        let (priority_mailer, priority_mailbox) = mpsc::unbounded_channel();
+        let (mailer, mailbox) = mpsc::channel(16);
         Self {
-            mailbox: receiver,
-            priority: VecDeque::new(),
+            mailbox,
+            priority_mailbox,
             stopped: false,
-            addr: Addr::new(sender),
+            addr: Addr::new(mailer, priority_mailer),
             agency,
         }
     }
 
     /// Pull the next message off the stack, waiting if there are none
     pub async fn message(&mut self) -> A::Msg {
-        if let Some(msg) = self.priority.pop_back() {
-            return msg;
+        select! {
+            biased;
+            Some(msg) = self.priority_mailbox.recv() => {
+                msg
+            }
+            Some(msg) = self.mailbox.recv() => {
+                msg
+            }
+            else => {
+                unreachable!("mailboxes live at least as long as the context");
+            }
         }
-
-        self.mailbox
-            .recv()
-            .await
-            .expect("channel cannot be closed whilst context lives")
     }
 
     pub fn stop(&mut self) {
@@ -52,6 +56,8 @@ where
     ///
     /// Messages sent this way take priority over regular messages.
     pub fn notify(&mut self, msg: impl Into<A::Msg>) {
-        self.priority.push_front(msg.into());
+        self.addr
+            .send_priority(msg)
+            .expect("mailboxes live at least as long as the context");
     }
 }
