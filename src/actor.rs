@@ -1,4 +1,4 @@
-use crate::context::Context;
+use crate::context::{Context, Stopped};
 use async_trait::async_trait;
 
 pub enum StoppingResult {
@@ -21,7 +21,7 @@ pub trait Actor: Send + Sync + Sized {
         StoppingResult::Stop
     }
 
-    async fn stopped(self, _ctx: &mut Context<Self>) {}
+    async fn stopped(self, _ctx: Context<Self, Stopped>) {}
 }
 
 #[async_trait]

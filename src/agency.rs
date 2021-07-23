@@ -3,13 +3,14 @@ use crate::{
     addr::Addr,
     context::Context,
 };
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::stream::FuturesUnordered;
 use std::{fmt::Debug, future::Future};
 use tokio::{
     select,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
+use tokio_stream::StreamExt;
 
 pub struct AgencyHandle {
     futures: FuturesUnordered<JoinHandle<()>>,
@@ -108,7 +109,7 @@ impl Agency {
                 }
             }
 
-            actor.stopped(&mut ctx).await;
+            actor.stopped(ctx.next_phase()).await;
         });
         addr
     }
@@ -136,7 +137,7 @@ impl Agency {
                     }
                 }
 
-                actor.stopped(&mut ctx).await;
+                actor.stopped(ctx.next_phase()).await;
             }
         });
         addr

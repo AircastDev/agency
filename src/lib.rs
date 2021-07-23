@@ -8,7 +8,7 @@ pub use crate::{
     actor::{Actor, Setup, StoppingResult},
     addr::{Addr, Recipient, SendError},
     agency::{Agency, AgencyHandle},
-    context::Context,
+    context::{Context, Running, Stopped},
     request::{Request, RequestError, RequestTimeoutError},
 };
 pub use async_trait::async_trait;

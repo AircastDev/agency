@@ -1,30 +1,38 @@
 use crate::{actor::Actor, addr::Addr, agency::Agency};
+use std::marker::PhantomData;
 use tokio::{select, sync::mpsc};
+use tokio_stream::{
+    wrappers::{ReceiverStream, UnboundedReceiverStream},
+    StreamExt,
+};
 
-pub struct Context<A>
-where
-    A: Actor,
-{
-    mailbox: mpsc::Receiver<A::Msg>,
-    priority_mailbox: mpsc::UnboundedReceiver<A::Msg>,
+pub struct Running;
+pub struct Stopped;
+
+pub trait Phase {}
+impl Phase for Running {}
+impl Phase for Stopped {}
+
+pub struct Context<A: Actor, P: Phase = Running> {
+    mailbox: ReceiverStream<A::Msg>,
+    priority_mailbox: UnboundedReceiverStream<A::Msg>,
     pub(crate) stopped: bool,
     addr: Addr<A>,
     pub agency: Agency,
+    _phase: PhantomData<P>,
 }
 
-impl<A> Context<A>
-where
-    A: Actor,
-{
+impl<A: Actor> Context<A, Running> {
     pub(crate) fn new(agency: Agency) -> Self {
         let (priority_mailer, priority_mailbox) = mpsc::unbounded_channel();
         let (mailer, mailbox) = mpsc::channel(16);
         Self {
-            mailbox,
-            priority_mailbox,
+            mailbox: ReceiverStream::new(mailbox),
+            priority_mailbox: UnboundedReceiverStream::new(priority_mailbox),
             stopped: false,
             addr: Addr::new(mailer, priority_mailer),
             agency,
+            _phase: PhantomData,
         }
     }
 
@@ -32,14 +40,14 @@ where
     pub async fn message(&mut self) -> A::Msg {
         select! {
             biased;
-            Some(msg) = self.priority_mailbox.recv() => {
+            Some(msg) = self.priority_mailbox.next() => {
                 msg
             }
-            Some(msg) = self.mailbox.recv() => {
+            Some(msg) = self.mailbox.next() => {
                 msg
             }
             else => {
-                unreachable!("mailboxes live at least as long as the context");
+                unreachable!("mailboxes live at least as long as the running context");
             }
         }
     }
@@ -59,5 +67,25 @@ where
         self.addr
             .send_priority(msg)
             .expect("mailboxes live at least as long as the context");
+    }
+
+    pub(crate) fn next_phase(mut self) -> Context<A, Stopped> {
+        self.mailbox.close();
+        self.priority_mailbox.close();
+        Context {
+            mailbox: self.mailbox,
+            priority_mailbox: self.priority_mailbox,
+            stopped: true,
+            addr: self.addr,
+            agency: self.agency,
+            _phase: PhantomData,
+        }
+    }
+}
+
+impl<A: Actor> Context<A, Stopped> {
+    /// Collect all of the remaining, unhandled messages
+    pub async fn drain(self) -> Vec<A::Msg> {
+        self.priority_mailbox.chain(self.mailbox).collect().await
     }
 }
